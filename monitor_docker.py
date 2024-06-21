@@ -16,8 +16,8 @@ logging.basicConfig(level=logging.INFO,
 docker_client = docker.from_env()
 
 # Telegram bot setup
-TELEGRAM_BOT_TOKEN = ''
-CHAT_ID = ''
+TELEGRAM_BOT_TOKEN = 'TELE_BOT_TOKEN_HERE'
+CHAT_ID = 'CHAT_ID_HERE'
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # Error patterns to look for in logs
