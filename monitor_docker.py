@@ -90,14 +90,25 @@ def send_alert(container_name, message):
     logging.warning(message)
 
 def check_container_logs(container):
+    # Check if the container is currently silenced
+    if container.name in silenced_alerts:
+        if datetime.now() < silenced_alerts[container.name]:
+            # If the container is silenced and the silence period is still valid, skip checking logs
+            return
+        else:
+            # If the silence period has expired, remove from the dictionary
+            del silenced_alerts[container.name]
+
     try:
-        logs = container.logs(tail=25).decode('utf-8')
+        logs = container.logs(tail=25).decode('utf-8')  # Fetch last 25 lines of logs
         for pattern in ERROR_PATTERNS:
             matches = re.finditer(pattern, logs, re.IGNORECASE)
             for match in matches:
                 context = logs[max(0, match.start() - 100):min(len(logs), match.end() + 100)]
                 if any(re.search(ignore_pattern, context, re.IGNORECASE) for ignore_pattern in IGNORE_PATTERNS):
-                    continue
+                    continue  # Skip writing the log if it matches any ignore pattern
+
+                # Compose the message to be sent as alert and logged
                 message = f"Error detected in container {container.name}:\n\n{context}"
                 send_alert(container.name, message)
                 write_container_logs(container.name, ": Errors in Log")
@@ -105,6 +116,7 @@ def check_container_logs(container):
         logging.error(f"Error checking logs for container {container.name}: {str(e)}")
     except Exception as e:
         logging.error(f"Error checking logs for container {container.name}: {str(e)}")
+
 
 def check_container_resources(container):
     try:
@@ -209,7 +221,6 @@ def check_containers():
                 logs = container.logs(tail=25).decode('utf-8')  # Updated to tail=25
                 message = f"Container {container.name} has stopped. Last 25 lines of logs:\n\n{logs}"
                 send_alert(container.name, message)
-                write_container_logs(container.name, ": Container exited")
             else:
                 check_container_logs(container)
                 check_container_resources(container)
@@ -336,7 +347,7 @@ def main():
         command = read_command()
         if command:
             handle_command(command)
-        time.sleep(1)  # Short sleep to prevent this loop from hogging the CPU
+        time.sleep(5)  # Short sleep to prevent this loop from hogging the CPU
 
 if __name__ == "__main__":
     main()

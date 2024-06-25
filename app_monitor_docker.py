@@ -85,7 +85,7 @@ def read_status_with_polling():
                 status = f.read().strip()
             os.remove(STATUS_FILE)  # Clear status file after reading
             return status
-        time.sleep(300)  # Check every second
+        time.sleep(300)  # Check every 3 minutes
     return "Failed to get status: Timeout"
 
 @bot.message_handler(commands=['start'])
@@ -172,8 +172,9 @@ def check_and_send_container_logs():
                 logs = file.read().strip()
             os.remove(CONTAINER_FILE)  # Optionally clear the file after reading
             if logs:
-                send_telegram_message(f"Container Logs: {logs}")
-        time.sleep(100)  # Wait for 1 minutes before checking again
+                logging.info("Log Errors Found. Sent Telegram Message.")
+                send_telegram_message(f"Container Logs: \n{logs}")
+        time.sleep(300)  # Wait for 3 minutes before checking again
 
 def main():
     logging.info("Parent script started.")
