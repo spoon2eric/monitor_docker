@@ -323,7 +323,7 @@ def check_containers_periodically():
             check_containers()
         except Exception as e:
             logging.error(f"An error occurred while checking containers: {str(e)}")
-        time.sleep(300)  # Sleep for 300 seconds or 5 minutes
+        time.sleep(10)  # Sleep for 300 seconds or 5 minutes
 
 def main():
     logging.info("Monitoring script started.")

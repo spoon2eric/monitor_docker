@@ -76,7 +76,7 @@ def send_command(command):
     logging.info(f"Sent command: {command}")
 
 def read_status_with_polling():
-    timeout = 300  # Maximum time to wait in seconds
+    timeout = 10  # Maximum time to wait in seconds
     start_time = time.time()
     while time.time() - start_time < timeout:
         if os.path.exists(STATUS_FILE):
@@ -84,7 +84,7 @@ def read_status_with_polling():
                 status = f.read().strip()
             os.remove(STATUS_FILE)  # Clear status file after reading
             return status
-        time.sleep(100)  # Check every 3 minutes
+        time.sleep(5)  # Check every 3 minutes
     return "Failed to get status: Timeout"
 
 @bot.message_handler(commands=['start'])
@@ -118,7 +118,7 @@ def handle_unsilence(message):
 @bot.message_handler(commands=['status'])
 def handle_status(message):
     send_command('status')
-    time.sleep(10)
+    time.sleep(5)
     status = read_status_with_polling()
     bot.reply_to(message, f"Status:\n{status}")
 
@@ -131,7 +131,7 @@ def handle_list(message):
 @bot.message_handler(commands=['disk_usage'])
 def handle_disk_usage(message):
     send_command('disk_usage')
-    time.sleep(10)
+    time.sleep(5)
     status = read_status_with_polling()
     bot.reply_to(message, f"Disk usage information:\n{status}")
 
@@ -173,7 +173,7 @@ def check_and_send_container_logs():
             if logs:
                 logging.info("Log Errors Found. Sent Telegram Message.")
                 send_telegram_message(f"Container Logs: \n{logs}")
-        time.sleep(300)  # Wait for 3 minutes before checking again
+        time.sleep(5)  # Wait for 3 minutes before checking again
 
 def main():
     logging.info("Parent script started.")
