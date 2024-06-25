@@ -37,12 +37,12 @@ ERROR_PATTERNS = [
 
 # Patterns to ignore in logs
 IGNORE_PATTERNS = [
-    #r'Failed to fetch price for ticker',
-    #r'No price fetched',
-    #r'use of closed network connection',
-    #r'Failed to list containers for docker',
-    #r'Cannot connect to docker server context canceled',
-    #r'/lib/python2.7/site-packages/chameleon/py26.py'
+    r'Failed to fetch price for ticker',
+    r'No price fetched',
+    r'use of closed network connection',
+    r'Failed to list containers for docker',
+    r'Cannot connect to docker server context canceled',
+    r'/lib/python2.7/site-packages/chameleon/py26.py'
 ]
 
 # Resource thresholds
