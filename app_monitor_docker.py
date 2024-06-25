@@ -76,7 +76,7 @@ def send_command(command):
     logging.info(f"Sent command: {command}")
 
 def read_status_with_polling():
-    timeout = 500  # Maximum time to wait in seconds
+    timeout = 300  # Maximum time to wait in seconds
     start_time = time.time()
     while time.time() - start_time < timeout:
         if os.path.exists(STATUS_FILE):
@@ -84,7 +84,7 @@ def read_status_with_polling():
                 status = f.read().strip()
             os.remove(STATUS_FILE)  # Clear status file after reading
             return status
-        time.sleep(300)  # Check every 3 minutes
+        time.sleep(100)  # Check every 3 minutes
     return "Failed to get status: Timeout"
 
 @bot.message_handler(commands=['start'])
