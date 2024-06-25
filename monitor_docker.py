@@ -1,5 +1,6 @@
+import os
+from dotenv import load_dotenv
 import docker
-import telebot
 import time
 import logging
 import re
@@ -7,18 +8,24 @@ import psutil
 from datetime import datetime, timedelta
 import threading
 import subprocess
+from requests.exceptions import ReadTimeout, ConnectionError
+
+# Load environment variables from .env file
+dotenv_path = "./config/.env"
+if not os.path.exists(dotenv_path):
+    raise Exception(f".env file not found at path: {dotenv_path}")
+
+load_dotenv(dotenv_path=dotenv_path)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Docker client
-docker_client = docker.from_env()
+# Disable debug logging for the Docker client
+docker_logger = logging.getLogger("urllib3.connectionpool")
+docker_logger.setLevel(logging.WARNING)
 
-# Telegram bot setup
-TELEGRAM_BOT_TOKEN = 'TELE_BOT_TOKEN_HERE'
-CHAT_ID = 'CHAT_ID_HERE'
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+# Docker client with increased timeout
+docker_client = docker.from_env(timeout=600)
 
 # Error patterns to look for in logs
 ERROR_PATTERNS = [
@@ -30,11 +37,12 @@ ERROR_PATTERNS = [
 
 # Patterns to ignore in logs
 IGNORE_PATTERNS = [
-    r'Failed to fetch price for ticker',
-    r'No price fetched',
-    r'use of closed network connection',
-    r'Failed to list containers for docker',
-    r'Cannot connect to docker server context canceled'
+    #r'Failed to fetch price for ticker',
+    #r'No price fetched',
+    #r'use of closed network connection',
+    #r'Failed to list containers for docker',
+    #r'Cannot connect to docker server context canceled',
+    #r'/lib/python2.7/site-packages/chameleon/py26.py'
 ]
 
 # Resource thresholds
@@ -44,13 +52,24 @@ DISK_THRESHOLD = 90  # percent
 
 # Dictionary to store silenced alerts
 silenced_alerts = {}
+shutdown_flag = threading.Event()
 
+COMMAND_FILE = '/tmp/monitor_commands.txt'
+STATUS_FILE = '/tmp/monitor_status.txt'
+CONTAINER_FILE = '/tmp/container_logs.txt'
+
+def initialize_files():
+    # Clean up the temporary files
+    if os.path.exists(COMMAND_FILE):
+        os.remove(COMMAND_FILE)
+    if os.path.exists(STATUS_FILE):
+        os.remove(STATUS_FILE)
+    logging.info("Temporary files cleaned up.")
 
 def silence_alert(container_name, duration_minutes):
     end_time = datetime.now() + timedelta(minutes=duration_minutes)
     silenced_alerts[container_name] = end_time
     return f"Alerts for container {container_name} silenced for {duration_minutes} minutes."
-
 
 def unsilence_alert(container_name):
     if container_name in silenced_alerts:
@@ -58,7 +77,6 @@ def unsilence_alert(container_name):
         return f"Alerts for container {container_name} unsilenced."
     else:
         return f"Container {container_name} was not silenced."
-
 
 def is_silenced(container_name):
     if container_name in silenced_alerts:
@@ -68,12 +86,8 @@ def is_silenced(container_name):
             del silenced_alerts[container_name]
     return False
 
-
 def send_alert(container_name, message):
-    if not is_silenced(container_name):
-        bot.send_message(CHAT_ID, message)
-        logging.warning(message)
-
+    logging.warning(message)
 
 def check_container_logs(container):
     try:
@@ -82,14 +96,15 @@ def check_container_logs(container):
             matches = re.finditer(pattern, logs, re.IGNORECASE)
             for match in matches:
                 context = logs[max(0, match.start() - 100):min(len(logs), match.end() + 100)]
-                # Check if context contains any ignore patterns
                 if any(re.search(ignore_pattern, context, re.IGNORECASE) for ignore_pattern in IGNORE_PATTERNS):
                     continue
                 message = f"Error detected in container {container.name}:\n\n{context}"
                 send_alert(container.name, message)
+                write_container_logs(container.name, ": Errors in Log")
+    except (ReadTimeout, ConnectionError) as e:
+        logging.error(f"Error checking logs for container {container.name}: {str(e)}")
     except Exception as e:
         logging.error(f"Error checking logs for container {container.name}: {str(e)}")
-
 
 def check_container_resources(container):
     try:
@@ -105,31 +120,73 @@ def check_container_resources(container):
         if cpu_percent > CPU_THRESHOLD:
             message = f"High CPU usage detected in container {container.name}: {cpu_percent:.2f}%"
             send_alert(container.name, message)
+            write_container_logs(container.name, ": CPU Threshold Too High")
 
         if memory_percent > MEMORY_THRESHOLD:
             message = f"High memory usage detected in container {container.name}: {memory_percent:.2f}%"
             send_alert(container.name, message)
+            write_container_logs(container.name, ": Memory Threshold Too High")
 
+    except (ReadTimeout, ConnectionError) as e:
+        logging.error(f"Error checking resources for container {container.name}: {str(e)}")
     except Exception as e:
         logging.error(f"Error checking resources for container {container.name}: {str(e)}")
 
+last_logged_usage = {}
 
 def check_disk_usage():
-    disk_usage = psutil.disk_usage('/')
-    if disk_usage.percent > DISK_THRESHOLD:
-        message = f"High disk usage detected: {disk_usage.percent}%"
-        send_alert('system', message)
+    global last_logged_usage
+    try:
+        partitions = psutil.disk_partitions()
+        usage_info = []
+        for partition in partitions:
+            if 'snap' in partition.mountpoint:
+                continue
+            usage = psutil.disk_usage(partition.mountpoint)
+            current_usage = f"{partition.device} ({partition.mountpoint}): {usage.percent}% used ({usage.used / (1024 ** 3):.2f}GB of {usage.total / (1024 ** 3):.2f}GB)"
 
+            # Log and update only if there is a significant change or if it's not previously logged
+            if partition.device not in last_logged_usage or abs(last_logged_usage[partition.device] - usage.percent) > 5:  # threshold of 5% change
+                logging.info("Disk usage information: " + current_usage)
+                last_logged_usage[partition.device] = usage.percent
+
+            usage_info.append(current_usage)
+        
+        return "\n".join(usage_info)
+    except Exception as e:
+        logging.error(f"Error checking disk usage: {str(e)}")
+        return "Error getting disk usage"
+
+
+def get_disk_usage():
+    try:
+        partitions = psutil.disk_partitions()
+        usage_info = []
+        for partition in partitions:
+            if 'snap' in partition.mountpoint:
+                continue
+            usage = psutil.disk_usage(partition.mountpoint)
+            usage_info.append(
+                f"{partition.device} ({partition.mountpoint}): "
+                f"{usage.percent}% used ({usage.used / (1024 ** 3):.2f}GB of "
+                f"{usage.total / (1024 ** 3):.2f}GB)")
+        logging.info("Disk usage information: " + "\n".join(usage_info))
+        return "\n".join(usage_info)
+    except Exception as e:
+        logging.error(f"Error getting disk usage: {str(e)}")
+        return "Error getting disk usage"
 
 def check_container_restarts(container):
     try:
         restart_count = container.attrs['RestartCount']
-        if restart_count > 5:  # Adjust this threshold as needed
+        if restart_count > 3:  # Adjust this threshold as needed
             message = f"Container {container.name} has restarted {restart_count} times"
             send_alert(container.name, message)
+            write_container_logs(container.name, ": Too Many Restarts")
+    except (ReadTimeout, ConnectionError) as e:
+        logging.error(f"Error checking restart count for container {container.name}: {str(e)}")
     except Exception as e:
         logging.error(f"Error checking restart count for container {container.name}: {str(e)}")
-
 
 def check_image_version(container):
     try:
@@ -138,18 +195,21 @@ def check_image_version(container):
         if not tags or 'latest' in tags:
             message = f"Container {container.name} is using an untagged or 'latest' image. Consider using specific version tags."
             send_alert(container.name, message)
+            write_container_logs(container.name, ": Image Check issue")
+    except (ReadTimeout, ConnectionError) as e:
+        logging.error(f"Error checking image version for container {container.name}: {str(e)}")
     except Exception as e:
         logging.error(f"Error checking image version for container {container.name}: {str(e)}")
-
 
 def check_containers():
     for container in docker_client.containers.list():
         try:
             container.reload()
             if container.status == 'exited':
-                logs = container.logs(tail=50).decode('utf-8')
-                message = f"Container {container.name} has stopped. Last 50 lines of logs:\n\n{logs}"
+                logs = container.logs(tail=25).decode('utf-8')  # Updated to tail=25
+                message = f"Container {container.name} has stopped. Last 25 lines of logs:\n\n{logs}"
                 send_alert(container.name, message)
+                write_container_logs(container.name, ": Container exited")
             else:
                 check_container_logs(container)
                 check_container_resources(container)
@@ -162,106 +222,121 @@ def check_containers():
 
     check_disk_usage()
 
+def read_command():
+    if os.path.exists(COMMAND_FILE):
+        with open(COMMAND_FILE, 'r') as f:
+            command = f.read().strip()
+        os.remove(COMMAND_FILE)
+        logging.info(f"Read command: {command}")
+        return command
+    logging.debug("No command found.")
+    return None
 
-@bot.message_handler(commands=['silence'])
-def handle_silence(message):
+def write_status(status):
+    logging.info(f"Writing status: {status}")
+    with open(STATUS_FILE, 'w') as f:
+        f.write(status)
+    logging.info(f"Status written: {status}")
+
+def write_container_logs(container_name, container_logs):
     try:
-        _, container_name, duration = message.text.split()
-        duration = int(duration)
-        response = silence_alert(container_name, duration)
-        bot.reply_to(message, response)
-    except ValueError:
-        bot.reply_to(message, "Invalid command. Use: /silence <container_name> <duration_minutes>")
+        # Construct the log entry
+        log_entry = f"{container_name}: {container_logs}\n"
+        
+        # Logging before attempting to write
+        logging.info(f"Attempting to write log for container '{container_name}'.")
 
+        # Writing the log entry to the file
+        with open(CONTAINER_FILE, 'a') as f:  # Open file in append mode
+            f.write(log_entry)  # Append new logs and add a newline for better readability
 
-@bot.message_handler(commands=['unsilence'])
-def handle_unsilence(message):
-    try:
-        _, container_name = message.text.split()
-        response = unsilence_alert(container_name)
-        bot.reply_to(message, response)
-    except ValueError:
-        bot.reply_to(message, "Invalid command. Use: /unsilence <container_name>")
-
-
-@bot.message_handler(commands=['status'])
-def handle_status(message):
-    status = "Currently silenced alerts:\n"
-    for container, end_time in silenced_alerts.items():
-        remaining = end_time - datetime.now()
-        status += f"{container}: silenced for {remaining.total_seconds() / 60:.1f} more minutes\n"
-    bot.reply_to(message, status if len(silenced_alerts) > 0 else "No alerts are currently silenced.")
-
-
-def restart_container(container_name):
-    try:
-        container = docker_client.containers.get(container_name)
-        container.restart()
-        return f"Container {container_name} has been restarted."
-    except docker.errors.NotFound:
-        return f"Container {container_name} not found."
+        # Logging after successful write
+        logging.info(f"Successfully written log for container '{container_name}'.")
+    
     except Exception as e:
-        return f"Error restarting container {container_name}: {str(e)}"
+        # Logging in case of an error during the write process
+        logging.error(f"Failed to write log for container '{container_name}': {str(e)}")
 
 
-def get_container_names():
-    return [container.name for container in docker_client.containers.list()]
+def handle_command(command):
+    logging.info(f"Received command: {command}")
+    status = ""
+    if command.startswith('silence'):
+        _, container_name, duration = command.split()
+        status = silence_alert(container_name, int(duration))
+        logging.info(f"Silenced alert for {container_name} for {duration} minutes.")
 
+    elif command.startswith('unsilence'):
+        _, container_name = command.split()
+        status = unsilence_alert(container_name)
+        logging.info(f"Unsilenced alert for {container_name}.")
 
-@bot.message_handler(commands=['log_clear'])
-def handle_log_clear(message):
-    try:
-        # Execute the truncate command
-        result = subprocess.run(['sudo', 'truncate', '-s', '0', '/var/lib/docker/containers/75a6b3ac07e26190484b2244901b71c447e1431adb93c81717cb07095142e8d0/75a6b3ac07e26190484b2244901b71c447e1431adb93c81717cb07095142e8d0-json.log'],
-                                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        bot.reply_to(message, "MongoDB logs have been truncated successfully.")
-    except subprocess.CalledProcessError as e:
-        bot.reply_to(message, f"Failed to truncate MongoDB logs: {e.stderr.decode()}")
+    elif command == 'status':
+        status = "Currently silenced alerts:\n"
+        if len(silenced_alerts) > 0:
+            for container, end_time in silenced_alerts.items():
+                remaining = end_time - datetime.now()
+                status += f"{container}: silenced for {remaining.total_seconds() / 60:.1f} more minutes\n"
+            logging.info("Displayed currently silenced alerts.")
+        else:
+            status += "No alerts are currently silenced."
+            logging.info("No alerts to display.")
 
+    elif command == 'list':
+        logging.info("Processing 'list' command.")
+        try:
+            container_names = [container.name for container in docker_client.containers.list()]
+            if container_names:
+                status = "\n".join(container_names)
+                logging.info(f"Active containers found: {container_names}")
+            else:
+                status = "No active containers found."
+                logging.info("No active containers found.")
+        except Exception as e:
+            logging.error(f"Error listing containers: {str(e)}")
+            status = f"Error listing containers: {str(e)}"
 
-@bot.message_handler(commands=['restart'])
-def handle_restart(message):
-    try:
-        _, container_name = message.text.split()
-        response = restart_container(container_name)
-        bot.reply_to(message, response)
-    except ValueError:
-        bot.reply_to(message, "Invalid command. Use: /restart <container_name>")
+    elif command == 'log_clear':
+        try:
+            subprocess.run(['sudo', 'truncate', '-s', '0', '/var/lib/docker/containers/75a6b3ac07e26190484b2244901b71c447e1431adb93c81717cb07095142e8d0/75a6b3ac07e26190484b2244901b71c447e1431adb93c81717cb07095142e8d0-json.log'],
+                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            status = "MongoDB logs have been truncated successfully."
+            logging.info(status)
+        except subprocess.CalledProcessError as e:
+            status = f"Failed to truncate MongoDB logs: {e.stderr.decode()}"
+            logging.error(status)
+        write_status(status)
 
+    elif command == 'disk_usage':
+        disk_usage = get_disk_usage()
+        status = disk_usage
+        logging.info(f"Disk usage reported: {disk_usage}")
 
-@bot.message_handler(commands=['list'])
-def handle_list(message):
-    container_names = get_container_names()
-    response = "Active containers:\n" + "\n".join(container_names)
-    bot.reply_to(message, response)
+    write_status(status)
+    logging.info(f"Status written for command '{command}': {status}")
 
-
-@bot.message_handler(commands=['help'])
-def handle_help(message):
-    help_text = """
-    Available commands:
-    /silence <container_name> <duration_minutes> - Silence alerts for a specific container for a set duration
-    /unsilence <container_name> - Remove silencing for a specific container
-    /status - Show which alerts are currently silenced and for how long
-    /restart <container_name> - Restart a specific container
-    /list - List all active container names
-    /log_clear - Truncate MongoDB logs
-    /help - Show this help message
-    """
-    bot.reply_to(message, help_text)
-
-
-def main():
-    # Start the bot polling in a separate thread
-    threading.Thread(target=bot.polling, daemon=True).start()
-
-    while True:
+def check_containers_periodically():
+    while not shutdown_flag.is_set():
         try:
             check_containers()
         except Exception as e:
-            logging.error(f"An error occurred: {str(e)}")
-        time.sleep(300)  # Check every 5 minutes
+            logging.error(f"An error occurred while checking containers: {str(e)}")
+        time.sleep(300)  # Sleep for 300 seconds or 5 minutes
 
+def main():
+    logging.info("Monitoring script started.")
+    initialize_files()  # Clean up temporary files
+    
+    # Start the thread for checking containers
+    container_thread = threading.Thread(target=check_containers_periodically)
+    container_thread.start()
+
+    # Main loop for handling commands
+    while not shutdown_flag.is_set():
+        command = read_command()
+        if command:
+            handle_command(command)
+        time.sleep(1)  # Short sleep to prevent this loop from hogging the CPU
 
 if __name__ == "__main__":
     main()
