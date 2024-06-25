@@ -218,7 +218,7 @@ def check_containers():
         try:
             container.reload()
             if container.status == 'exited':
-                logs = container.logs(tail=25).decode('utf-8')  # Updated to tail=25
+                logs = container.logs(tail=25).decode('utf-8')
                 message = f"Container {container.name} has stopped. Last 25 lines of logs:\n\n{logs}"
                 send_alert(container.name, message)
             else:
@@ -251,21 +251,12 @@ def write_status(status):
 
 def write_container_logs(container_name, container_logs):
     try:
-        # Construct the log entry
         log_entry = f"{container_name}: {container_logs}\n"
-        
-        # Logging before attempting to write
         logging.info(f"Attempting to write log for container '{container_name}'.")
-
-        # Writing the log entry to the file
-        with open(CONTAINER_FILE, 'a') as f:  # Open file in append mode
-            f.write(log_entry)  # Append new logs and add a newline for better readability
-
-        # Logging after successful write
+        with open(CONTAINER_FILE, 'a') as f:
+            f.write(log_entry)
         logging.info(f"Successfully written log for container '{container_name}'.")
-    
     except Exception as e:
-        # Logging in case of an error during the write process
         logging.error(f"Failed to write log for container '{container_name}': {str(e)}")
 
 
@@ -347,7 +338,7 @@ def main():
         command = read_command()
         if command:
             handle_command(command)
-        time.sleep(5)  # Short sleep to prevent this loop from hogging the CPU
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()

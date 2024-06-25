@@ -2,7 +2,6 @@ import os
 import subprocess
 import threading
 import telebot
-#import threading
 import logging
 import time
 from dotenv import load_dotenv
@@ -77,7 +76,7 @@ def send_command(command):
     logging.info(f"Sent command: {command}")
 
 def read_status_with_polling():
-    timeout = 30  # Maximum time to wait in seconds
+    timeout = 500  # Maximum time to wait in seconds
     start_time = time.time()
     while time.time() - start_time < timeout:
         if os.path.exists(STATUS_FILE):
